@@ -16,32 +16,29 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-# Function to convert text to table from the PDF
-def convert_text_to_table(pdf_file):
+# Function to extract the NIR Potency Avg (mg) from the PDF
+def extract_nir_potency_avg(pdf_file):
     with pdfplumber.open(pdf_file) as pdf:
-        page = pdf.pages[0]
-        pdf_text = page.extract_text()
+        text = ""
+        for page in pdf.pages:
+            text += page.extract_text()
 
-        if not pdf_text:
-            print("No text extracted from the PDF.")
+        # Locate the relevant section based on "Absolute Average"
+        nir_potency_avg_start = text.find("Absolute Average")
+        if nir_potency_avg_start == -1:
             return None
-        
-        # Split the text into lines
-        lines = pdf_text.split("\n")
-        
-        # Prepare an empty list to hold the rows of the table
-        table = []
 
-        # Start parsing the lines into a table structure
-        for line in lines:
-            # Clean up the line: remove excess whitespace and split by spaces
-            columns = line.split()
-            
-            # Only add meaningful rows to the table (filter out noise)
-            if len(columns) > 1:  # Assuming useful rows have at least 2 columns
-                table.append(columns)
+        # Capture the next 300 characters after the "Absolute Average"
+        nir_potency_avg_end = nir_potency_avg_start + 300
+        nir_potency_avg_section = text[nir_potency_avg_start:nir_potency_avg_end]
 
-        return table
+        # Extract the numerical value using regex
+        match = re.findall(r"\d+\.\d+", nir_potency_avg_section)
+        if match:
+            nir_potency_avg_value = match[0]  # First match should be the NIR Potency Avg (mg)
+            return float(nir_potency_avg_value)
+        else:
+            return None
 
 # Function to extract values from the PDF
 def extract_values_from_pdf(pdf_file):
@@ -71,63 +68,42 @@ def extract_values_from_pdf(pdf_file):
     specification_value = re.search(specification_pattern, pdf_text)
     specification_value = specification_value.group(1) if specification_value else "N/A"
 
+    # Extract NIR Potency Avg
+    nir_potency_avg_value = extract_nir_potency_avg(pdf_file)
+
     return {
         'nir_qc': nir_qc_value,
         'batch_name': batch_name,
         'lims_report': lims_mm_sample,
         'absolute_avg': absolute_avg_value,
-        'acceptance_criteria': specification_value
+        'acceptance_criteria': specification_value,
+        'nir_potency_avg': nir_potency_avg_value  # Return NIR potency avg
     }
 
-# Function to replace text in DOCX
-def replace_text_in_paragraphs_and_tables(doc, old_values, new_values):
-    for para in doc.paragraphs:
-        for key, pattern in old_values.items():
-            new_value = new_values[key]
-            if re.search(pattern, para.text):
-                para.text = re.sub(pattern, new_value, para.text)
-    
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for key, pattern in old_values.items():
-                    new_value = new_values[key]
-                    if re.search(pattern, cell.text):
-                        cell.text = re.sub(pattern, new_value, cell.text)
-
-
 # Function to find NIR potency and validate the file
-def validate_potency_value(table, expected_range):
-    for row in table:
-        for cell in row:
-            try:
-                # Attempt to convert the cell to a float
-                value = float(cell)
-                
-                # Check if the value matches the expected range
-                if expected_range == '2.5mg' and 2.0 <= value <= 3.0:
-                    return True
-                elif expected_range == '5mg' and 4.5 <= value <= 5.5:
-                    return True
-            except ValueError:
-                # If the cell is not a number, continue to the next cell
-                continue
+def validate_potency_value(nir_potency_avg_value, expected_range):
+    
+    value = nir_potency_avg_value
 
-    # If no matching values were found, return False
+    if expected_range == '2.5mg' and 2.0 <= value <= 3.0:
+        return True
+    elif expected_range == '5mg' and 4.5 <= value <= 5.5:
+        return True
     return False
 
 # Main function to handle DOCX replacement
 def automate_replacement(pdf_file, expected_range, user_qe_number):
     new_values = extract_values_from_pdf(pdf_file)
-    table = convert_text_to_table(pdf_file)
-    if table is None:
-        return "Error: Unable to extract text from PDF."
-    
+
+    if new_values['nir_potency_avg'] is None:
+        flash("Error: NIR Potency Avg not found in the PDF.")
+        return None
+
     # Validate the NIR potency based on the expected range
-    if not validate_potency_value(table, expected_range):
+    if not validate_potency_value(new_values['nir_potency_avg'], expected_range):
         flash(f"Incorrect file. Please upload a {expected_range} PDF.")
         return None  # Indicate that the validation failed
-    
+
     # Determine the appropriate document template
     if expected_range == '2.5mg':
         doc_template = DEFAULT_DOCX_TEMPLATE_25
@@ -135,7 +111,7 @@ def automate_replacement(pdf_file, expected_range, user_qe_number):
         doc_template = DEFAULT_DOCX_TEMPLATE_5
 
     updated_filename = os.path.join(app.config['UPLOAD_FOLDER'], f"Antaris_verification({expected_range}).docx")
-    
+
     # Load the DOCX template
     doc = docx.Document(doc_template)
 
@@ -173,7 +149,7 @@ def replace_text_in_paragraphs_and_tables(doc, old_values, new_values):
             new_value = new_values[key]
             if re.search(pattern, para.text):
                 para.text = re.sub(pattern, new_value, para.text)
-    
+
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
@@ -211,3 +187,5 @@ def download_file(filename):
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
